@@ -145,6 +145,8 @@ fun InboxScreen(
         }
     }
 
+    val semantic = LocalKmsSemanticColors.current
+
     Scaffold(
         topBar = {
             if (selectedThreadForMenu != null) {

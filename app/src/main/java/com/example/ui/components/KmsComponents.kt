@@ -383,15 +383,6 @@ private fun PrivacyBulletRow(icon: ImageVector, title: String, text: String) {
         }
     }
 }
-            modifier = Modifier.size(18.dp)
-        )
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-    }
-}
 
 @Composable
 fun MoveToFolderDialog(
