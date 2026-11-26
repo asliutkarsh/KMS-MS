@@ -68,6 +68,7 @@ data class SnackbarEvent(
     val message: String,
     val actionLabel: String? = null,
     val undoThreadKey: String? = null,
+    val undoThreadKeys: List<String> = emptyList(),
     val undoMessageId: Long? = null
 )
 
@@ -399,6 +400,115 @@ class KmsMainViewModel(application: Application) : AndroidViewModel(application)
 
     fun undoDeleteThread(threadKey: String) {
         viewModelScope.launch { repository.restoreThread(threadKey) }
+    }
+
+    fun undoDeleteThreads(threadKeys: List<String>) {
+        viewModelScope.launch {
+            for (key in threadKeys) {
+                repository.restoreThread(key)
+            }
+        }
+    }
+
+    fun markThreadsRead(threads: List<ThreadSummary>, isRead: Boolean) {
+        if (threads.isEmpty()) return
+        viewModelScope.launch {
+            for (t in threads) {
+                repository.setThreadRead(t.threadKey, isRead)
+            }
+            val count = threads.size
+            val label = if (count == 1) threads.first().displayTitle else "$count conversations"
+            _snackbarEvents.tryEmit(
+                SnackbarEvent(if (isRead) "Marked $label as read" else "Marked $label as unread")
+            )
+        }
+    }
+
+    fun setThreadsStarred(threads: List<ThreadSummary>, starred: Boolean) {
+        if (threads.isEmpty()) return
+        viewModelScope.launch {
+            for (t in threads) {
+                repository.setThreadStarred(t.threadKey, starred)
+            }
+            val count = threads.size
+            val msg = if (count == 1) {
+                if (starred) "Starred ${threads.first().displayTitle}" else "Removed star"
+            } else {
+                if (starred) "Starred $count conversations" else "Removed star from $count conversations"
+            }
+            _snackbarEvents.tryEmit(SnackbarEvent(msg))
+        }
+    }
+
+    fun moveThreadsToCategory(threads: List<ThreadSummary>, target: SmsCategory) {
+        if (threads.isEmpty()) return
+        viewModelScope.launch {
+            for (t in threads) {
+                repository.moveSenderToCategory(t.threadKey, t.address, target)
+            }
+            val count = threads.size
+            val label = if (count == 1) threads.first().displayTitle else "$count senders"
+            _snackbarEvents.tryEmit(
+                SnackbarEvent("Moved $label to ${target.label}. Future texts will auto-sort here.")
+            )
+        }
+    }
+
+    fun blockSenders(threads: List<ThreadSummary>) {
+        if (threads.isEmpty()) return
+        viewModelScope.launch {
+            for (t in threads) {
+                repository.setSenderBlocked(t.threadKey, t.address, true, t.category)
+            }
+            val count = threads.size
+            val label = if (count == 1) threads.first().displayTitle else "$count senders"
+            _snackbarEvents.tryEmit(SnackbarEvent("Blocked $label"))
+        }
+    }
+
+    fun deleteThreads(threads: List<ThreadSummary>) {
+        if (threads.isEmpty()) return
+        val keys = threads.map { it.threadKey }
+        viewModelScope.launch {
+            for (key in keys) {
+                repository.softDeleteThread(key)
+            }
+            val msg = if (threads.size == 1) {
+                "Deleted conversation with ${threads.first().displayTitle}"
+            } else {
+                "Deleted ${threads.size} conversations"
+            }
+            _snackbarEvents.tryEmit(
+                SnackbarEvent(
+                    message = msg,
+                    actionLabel = "Undo",
+                    undoThreadKeys = keys
+                )
+            )
+        }
+    }
+
+    fun setMessagesStarred(messages: List<SmsMessageEntity>, starred: Boolean) {
+        if (messages.isEmpty()) return
+        viewModelScope.launch {
+            for (m in messages) {
+                repository.setMessageStarred(m.id, starred)
+            }
+        }
+    }
+
+    fun deleteMessages(messages: List<SmsMessageEntity>) {
+        if (messages.isEmpty()) return
+        viewModelScope.launch {
+            for (m in messages) {
+                repository.deleteMessagePermanently(m.id)
+            }
+            _snackbarEvents.tryEmit(
+                SnackbarEvent(
+                    if (messages.size == 1) "Message deleted" else "Deleted ${messages.size} messages"
+                )
+            )
+        }
     }
 
     fun deleteMessage(smsId: Long) {

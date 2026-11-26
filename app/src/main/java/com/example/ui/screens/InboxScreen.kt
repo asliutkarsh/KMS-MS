@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -30,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.rounded.MarkEmailUnread
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.ScheduleSend
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Star
@@ -121,8 +124,16 @@ fun InboxScreen(
 
     var showSearch by remember { mutableStateOf(false) }
     var overflowExpanded by remember { mutableStateOf(false) }
-    var selectedThreadForMenu by remember { mutableStateOf<ThreadSummary?>(null) }
-    var moveTargetThread by remember { mutableStateOf<ThreadSummary?>(null) }
+    var selectedThreadKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var moveTargetThreads by remember { mutableStateOf<List<ThreadSummary>>(emptyList()) }
+
+    BackHandler(enabled = selectedThreadKeys.isNotEmpty()) {
+        selectedThreadKeys = emptySet()
+    }
+
+    val selectedThreads = remember(allThreads, selectedThreadKeys) {
+        allThreads.filter { it.threadKey in selectedThreadKeys }
+    }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -150,63 +161,110 @@ fun InboxScreen(
 
     Scaffold(
         topBar = {
-            if (selectedThreadForMenu != null) {
-                val active = selectedThreadForMenu!!
+            if (selectedThreads.isNotEmpty()) {
+                val anyUnread = selectedThreads.any { it.unreadCount > 0 }
+                val anyUnstarred = selectedThreads.any { !it.isStarred }
+                val activeTab = tabs[pagerState.currentPage]
+                val query = searchQuery.trim().lowercase()
+                val visibleTabKeys = allThreads.filter { thread ->
+                    val matchesTab = when (activeTab) {
+                        InboxTab.PERSONAL -> thread.category == SmsCategory.PERSONAL
+                        InboxTab.TRANSACTIONS -> thread.category == SmsCategory.TRANSACTION
+                        InboxTab.PROMOTIONS -> thread.category == SmsCategory.PROMOTION
+                        InboxTab.STARRED -> thread.isStarred
+                    }
+                    val matchesUnread = !unreadOnly || thread.unreadCount > 0
+                    val matchesQuery = query.isBlank() ||
+                        thread.displayTitle.lowercase().contains(query) ||
+                        thread.address.lowercase().contains(query) ||
+                        thread.lastSnippet.lowercase().contains(query) ||
+                        (thread.latestOtp?.contains(query) == true)
+                    matchesTab && matchesUnread && matchesQuery
+                }.map { it.threadKey }.toSet()
+
                 TopAppBar(
                     title = {
                         Text(
-                            text = active.displayTitle,
+                            text = if (selectedThreads.size == 1) {
+                                selectedThreads.first().displayTitle
+                            } else {
+                                "${selectedThreads.size} selected"
+                            },
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     },
                     navigationIcon = {
-                        IconButton(onClick = { selectedThreadForMenu = null }) {
+                        IconButton(onClick = { selectedThreadKeys = emptySet() }) {
                             Icon(Icons.Rounded.Close, contentDescription = "Close selection")
                         }
                     },
                     actions = {
                         IconButton(
                             onClick = {
-                                viewModel.toggleThreadStar(active)
-                                selectedThreadForMenu = null
+                                selectedThreadKeys = if (visibleTabKeys.isNotEmpty() && selectedThreadKeys.containsAll(visibleTabKeys)) {
+                                    emptySet()
+                                } else {
+                                    selectedThreadKeys + visibleTabKeys
+                                }
                             },
-                            modifier = Modifier.testTag("action_star_thread")
+                            modifier = Modifier.testTag("action_select_all_threads")
+                        ) {
+                            Icon(Icons.Rounded.SelectAll, contentDescription = "Select all in tab")
+                        }
+                        IconButton(
+                            onClick = {
+                                viewModel.markThreadsRead(selectedThreads, anyUnread)
+                                selectedThreadKeys = emptySet()
+                            },
+                            modifier = Modifier.testTag("action_mark_read_threads")
                         ) {
                             Icon(
-                                if (active.isStarred) Icons.Rounded.Star else Icons.Rounded.StarOutline,
-                                contentDescription = "Star thread"
+                                if (anyUnread) Icons.Rounded.MarkEmailRead else Icons.Rounded.MarkEmailUnread,
+                                contentDescription = if (anyUnread) "Mark selected read" else "Mark selected unread"
                             )
                         }
                         IconButton(
                             onClick = {
-                                moveTargetThread = active
-                                selectedThreadForMenu = null
+                                viewModel.setThreadsStarred(selectedThreads, anyUnstarred)
+                                selectedThreadKeys = emptySet()
+                            },
+                            modifier = Modifier.testTag("action_star_thread")
+                        ) {
+                            Icon(
+                                if (anyUnstarred) Icons.Rounded.StarOutline else Icons.Rounded.Star,
+                                contentDescription = "Star selected threads"
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                moveTargetThreads = selectedThreads
+                                selectedThreadKeys = emptySet()
                             },
                             modifier = Modifier.testTag("action_move_thread")
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Rounded.DriveFileMove,
-                                contentDescription = "Move sender to folder"
+                                contentDescription = "Move selected to folder"
                             )
                         }
                         IconButton(
                             onClick = {
-                                viewModel.blockSender(active)
-                                selectedThreadForMenu = null
+                                viewModel.blockSenders(selectedThreads)
+                                selectedThreadKeys = emptySet()
                             },
                             modifier = Modifier.testTag("action_block_sender")
                         ) {
-                            Icon(Icons.Rounded.Block, contentDescription = "Block sender")
+                            Icon(Icons.Rounded.Block, contentDescription = "Block selected senders")
                         }
                         IconButton(
                             onClick = {
-                                viewModel.deleteThread(active)
-                                selectedThreadForMenu = null
+                                viewModel.deleteThreads(selectedThreads)
+                                selectedThreadKeys = emptySet()
                             },
                             modifier = Modifier.testTag("action_delete_thread")
                         ) {
-                            Icon(Icons.Rounded.Delete, contentDescription = "Delete thread")
+                            Icon(Icons.Rounded.Delete, contentDescription = "Delete selected threads")
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -527,19 +585,27 @@ fun InboxScreen(
                         modifier = Modifier.fillMaxSize()
                     ) {
                         items(pageThreads, key = { it.threadKey }) { thread ->
+                            val isSelected = thread.threadKey in selectedThreadKeys
+                            val toggleSelection = {
+                                selectedThreadKeys = if (isSelected) {
+                                    selectedThreadKeys - thread.threadKey
+                                } else {
+                                    selectedThreadKeys + thread.threadKey
+                                }
+                            }
                             val rowContent: @Composable () -> Unit = {
                                 ThreadCardRow(
                                     thread = thread,
-                                    isSelected = selectedThreadForMenu?.threadKey == thread.threadKey,
+                                    isSelected = isSelected,
                                     onClick = {
-                                        if (selectedThreadForMenu != null) {
-                                            selectedThreadForMenu = null
+                                        if (selectedThreadKeys.isNotEmpty()) {
+                                            toggleSelection()
                                         } else {
                                             viewModel.markThreadRead(thread.threadKey, true)
                                             onOpenThread(thread.threadKey)
                                         }
                                     },
-                                    onLongClick = { selectedThreadForMenu = thread },
+                                    onLongClick = { toggleSelection() },
                                     onCopyOtp = { otp ->
                                         val cm = context.getSystemService(ClipboardManager::class.java)
                                         cm?.setPrimaryClip(ClipData.newPlainText("OTP", otp))
@@ -548,7 +614,7 @@ fun InboxScreen(
                                 )
                             }
 
-                            if (!prefs.tabSwipeEnabled &&
+                            if (selectedThreadKeys.isEmpty() && !prefs.tabSwipeEnabled &&
                                 (prefs.leftSwipeAction != SwipeAction.NONE || prefs.rightSwipeAction != SwipeAction.NONE)
                             ) {
                                 SwipeableThreadContainer(
@@ -563,7 +629,7 @@ fun InboxScreen(
                                                 notifyUser = true
                                             )
                                             SwipeAction.STAR -> viewModel.toggleThreadStar(thread)
-                                            SwipeAction.MOVE_TO -> moveTargetThread = thread
+                                            SwipeAction.MOVE_TO -> moveTargetThreads = listOf(thread)
                                             SwipeAction.DELETE -> viewModel.deleteThread(thread)
                                             SwipeAction.NONE -> Unit
                                         }
@@ -580,15 +646,20 @@ fun InboxScreen(
         }
     }
 
-    moveTargetThread?.let { target ->
+    if (moveTargetThreads.isNotEmpty()) {
+        val label = if (moveTargetThreads.size == 1) {
+            moveTargetThreads.first().displayTitle
+        } else {
+            "${moveTargetThreads.size} conversations"
+        }
         MoveToFolderDialog(
-            senderTitle = target.displayTitle,
-            currentCategory = target.category,
+            senderTitle = label,
+            currentCategory = moveTargetThreads.first().category,
             onSelectCategory = { newCat ->
-                viewModel.moveThreadToCategory(target, newCat)
-                moveTargetThread = null
+                viewModel.moveThreadsToCategory(moveTargetThreads, newCat)
+                moveTargetThreads = emptyList()
             },
-            onDismiss = { moveTargetThread = null }
+            onDismiss = { moveTargetThreads = emptyList() }
         )
     }
 }
@@ -725,7 +796,21 @@ private fun ThreadCardRow(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.Top
         ) {
-            SenderMonogram(title = thread.displayTitle, category = thread.category)
+            if (isSelected) {
+                Box(
+                    modifier = Modifier.size(44.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CheckCircle,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
+            } else {
+                SenderMonogram(title = thread.displayTitle, category = thread.category)
+            }
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(

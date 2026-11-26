@@ -255,6 +255,9 @@ private fun KmsMsRootApp(
             )
             if (result == SnackbarResult.ActionPerformed) {
                 event.undoThreadKey?.let { viewModel.undoDeleteThread(it) }
+                if (event.undoThreadKeys.isNotEmpty()) {
+                    viewModel.undoDeleteThreads(event.undoThreadKeys)
+                }
                 event.undoMessageId?.let { viewModel.undoDeleteMessage(it) }
             }
         }

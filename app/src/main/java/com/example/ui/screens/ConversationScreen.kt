@@ -7,10 +7,13 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.ContactsContract
 import android.speech.RecognizerIntent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -123,6 +126,15 @@ fun ConversationScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var showScheduleDialog by remember { mutableStateOf(false) }
     var forwardBillTarget by remember { mutableStateOf<SmsMessageEntity?>(null) }
+    var selectedMessageIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+
+    BackHandler(enabled = selectedMessageIds.isNotEmpty()) {
+        selectedMessageIds = emptySet()
+    }
+
+    val selectedMessages = remember(messages, selectedMessageIds) {
+        messages.filter { it.id in selectedMessageIds }
+    }
 
     val context = LocalContext.current
     val listState = rememberLazyListState()
@@ -172,76 +184,119 @@ fun ConversationScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = title,
-                            style = MaterialTheme.typography.titleLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "${currentCategory.label} • $address",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack, modifier = Modifier.testTag("conversation_back_button")) {
-                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(Icons.Rounded.MoreVert, contentDescription = "Thread options")
+            if (selectedMessages.isNotEmpty()) {
+                val anyUnstarred = selectedMessages.any { !it.isStarred }
+                TopAppBar(
+                    title = { Text("${selectedMessages.size} selected") },
+                    navigationIcon = {
+                        IconButton(onClick = { selectedMessageIds = emptySet() }) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Close selection")
                         }
-                        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Move sender to folder") },
-                                leadingIcon = { Icon(Icons.AutoMirrored.Rounded.DriveFileMove, null) },
-                                onClick = { menuExpanded = false; showMoveDialog = true }
+                    },
+                    actions = {
+                        IconButton(onClick = {
+                            val combined = selectedMessages.joinToString("\n\n") { it.body }
+                            val cm = context.getSystemService(ClipboardManager::class.java)
+                            cm?.setPrimaryClip(ClipData.newPlainText("SMS", combined))
+                            viewModel.emitSnackbar(
+                                if (selectedMessages.size == 1) "Message copied" else "Copied ${selectedMessages.size} messages"
                             )
-                            if (isGroup || messages.isNotEmpty()) {
+                            selectedMessageIds = emptySet()
+                        }) {
+                            Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy selected messages")
+                        }
+                        IconButton(onClick = {
+                            viewModel.setMessagesStarred(selectedMessages, anyUnstarred)
+                            selectedMessageIds = emptySet()
+                        }) {
+                            Icon(
+                                if (anyUnstarred) Icons.Rounded.StarOutline else Icons.Rounded.Star,
+                                contentDescription = "Star selected messages"
+                            )
+                        }
+                        IconButton(onClick = {
+                            viewModel.deleteMessages(selectedMessages)
+                            selectedMessageIds = emptySet()
+                        }) {
+                            Icon(Icons.Rounded.Delete, contentDescription = "Delete selected messages")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                )
+            } else {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(
+                                text = title,
+                                style = MaterialTheme.typography.titleLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${currentCategory.label} • $address",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack, modifier = Modifier.testTag("conversation_back_button")) {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                    actions = {
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) {
+                                Icon(Icons.Rounded.MoreVert, contentDescription = "Thread options")
+                            }
+                            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                                 DropdownMenuItem(
-                                    text = { Text("Rename conversation") },
-                                    leadingIcon = { Icon(Icons.Rounded.Edit, null) },
-                                    onClick = { menuExpanded = false; showRenameDialog = true }
+                                    text = { Text("Move sender to folder") },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Rounded.DriveFileMove, null) },
+                                    onClick = { menuExpanded = false; showMoveDialog = true }
+                                )
+                                if (isGroup || messages.isNotEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("Rename conversation") },
+                                        leadingIcon = { Icon(Icons.Rounded.Edit, null) },
+                                        onClick = { menuExpanded = false; showRenameDialog = true }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Block sender") },
+                                    leadingIcon = { Icon(Icons.Rounded.Block, null) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        viewModel.blockSender(
+                                            ThreadSummary(
+                                                threadKey = threadKey,
+                                                displayTitle = title,
+                                                address = address,
+                                                lastSnippet = latest?.body.orEmpty(),
+                                                lastTimestamp = latest?.timestamp ?: 0L,
+                                                unreadCount = 0,
+                                                isStarred = false,
+                                                category = currentCategory,
+                                                isBlocked = false,
+                                                latestOtp = null,
+                                                isGroup = isGroup,
+                                                messageCount = messages.size
+                                            )
+                                        )
+                                        onBack()
+                                    }
                                 )
                             }
-                            DropdownMenuItem(
-                                text = { Text("Block sender") },
-                                leadingIcon = { Icon(Icons.Rounded.Block, null) },
-                                onClick = {
-                                    menuExpanded = false
-                                    viewModel.blockSender(
-                                        ThreadSummary(
-                                            threadKey = threadKey,
-                                            displayTitle = title,
-                                            address = address,
-                                            lastSnippet = latest?.body.orEmpty(),
-                                            lastTimestamp = latest?.timestamp ?: 0L,
-                                            unreadCount = 0,
-                                            isStarred = false,
-                                            category = currentCategory,
-                                            isBlocked = false,
-                                            latestOtp = null,
-                                            isGroup = isGroup,
-                                            messageCount = messages.size
-                                        )
-                                    )
-                                    onBack()
-                                }
-                            )
                         }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-            )
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                )
+            }
         },
         bottomBar = {
             Surface(
@@ -406,8 +461,23 @@ fun ConversationScreen(
                 .padding(innerPadding)
         ) {
             items(messages, key = { it.id }) { msg ->
+                val isSelected = msg.id in selectedMessageIds
+                val toggleMsgSelection = {
+                    selectedMessageIds = if (isSelected) {
+                        selectedMessageIds - msg.id
+                    } else {
+                        selectedMessageIds + msg.id
+                    }
+                }
                 MessageBubbleItem(
                     msg = msg,
+                    isSelected = isSelected,
+                    onClick = {
+                        if (selectedMessageIds.isNotEmpty()) {
+                            toggleMsgSelection()
+                        }
+                    },
+                    onLongClick = { toggleMsgSelection() },
                     onCopyOtp = { otp ->
                         val cm = context.getSystemService(ClipboardManager::class.java)
                         cm?.setPrimaryClip(ClipData.newPlainText("OTP", otp))
@@ -538,9 +608,13 @@ fun ConversationScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubbleItem(
     msg: SmsMessageEntity,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onCopyOtp: (String) -> Unit,
     onDeleteOtp: () -> Unit,
     onToggleStar: () -> Unit,
@@ -548,31 +622,40 @@ private fun MessageBubbleItem(
 ) {
     val semantic = LocalKmsSemanticColors.current
     val alignment = if (msg.isIncoming) Alignment.Start else Alignment.End
-    val bubbleColor = if (msg.isIncoming) {
-        MaterialTheme.colorScheme.surface
-    } else {
-        MaterialTheme.colorScheme.primaryContainer
+    val bubbleColor = when {
+        isSelected -> MaterialTheme.colorScheme.secondaryContainer
+        msg.isIncoming -> MaterialTheme.colorScheme.surface
+        else -> MaterialTheme.colorScheme.primaryContainer
     }
-    val textColor = if (msg.isIncoming) {
-        MaterialTheme.colorScheme.onSurface
-    } else {
-        MaterialTheme.colorScheme.onPrimaryContainer
+    val textColor = when {
+        isSelected -> MaterialTheme.colorScheme.onSecondaryContainer
+        msg.isIncoming -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onPrimaryContainer
     }
+
+    val bubbleShape = RoundedCornerShape(
+        topStart = 18.dp,
+        topEnd = 18.dp,
+        bottomStart = if (msg.isIncoming) 4.dp else 18.dp,
+        bottomEnd = if (msg.isIncoming) 18.dp else 4.dp
+    )
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = alignment
     ) {
         Surface(
-            shape = RoundedCornerShape(
-                topStart = 18.dp,
-                topEnd = 18.dp,
-                bottomStart = if (msg.isIncoming) 4.dp else 18.dp,
-                bottomEnd = if (msg.isIncoming) 18.dp else 4.dp
-            ),
+            shape = bubbleShape,
             color = bubbleColor,
-            border = if (msg.isIncoming) BorderStroke(1.dp, semantic.cardBorder) else null,
-            modifier = Modifier.widthIn(max = 320.dp)
+            border = when {
+                isSelected -> BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+                msg.isIncoming -> BorderStroke(1.dp, semantic.cardBorder)
+                else -> null
+            },
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .clip(bubbleShape)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 if (!msg.attachmentUri.isNullOrBlank()) {
