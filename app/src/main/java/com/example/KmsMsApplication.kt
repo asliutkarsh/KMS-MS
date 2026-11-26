@@ -2,6 +2,7 @@ package com.example
 
 import android.app.Application
 import com.example.backup.EncryptedBackupManager
+import com.example.backup.SmsXmlExporter
 import com.example.data.local.KmsDatabase
 import com.example.data.local.UserPreferencesRepository
 import com.example.data.repository.KmsRepository
@@ -21,6 +22,8 @@ class KmsMsApplication : Application() {
         private set
     lateinit var encryptedBackupManager: EncryptedBackupManager
         private set
+    lateinit var smsXmlExporter: SmsXmlExporter
+        private set
     lateinit var repository: KmsRepository
         private set
 
@@ -33,13 +36,15 @@ class KmsMsApplication : Application() {
             ensureChannelsCreated()
         }
         encryptedBackupManager = EncryptedBackupManager(this)
+        smsXmlExporter = SmsXmlExporter(this)
         repository = KmsRepository(
             context = this,
             db = database,
             prefsRepo = preferencesRepository,
             syncManager = deviceSmsSyncManager,
             notificationManager = notificationManager,
-            backupManager = encryptedBackupManager
+            backupManager = encryptedBackupManager,
+            xmlExporter = smsXmlExporter
         )
         AutoCleanupWorker.schedulePeriodic(this)
     }

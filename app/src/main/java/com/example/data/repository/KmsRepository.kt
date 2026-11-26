@@ -3,7 +3,9 @@ package com.example.data.repository
 import android.content.Context
 import android.net.Uri
 import com.example.backup.EncryptedBackupManager
+import com.example.backup.ExportFolder
 import com.example.backup.KmsBackupPayload
+import com.example.backup.SmsXmlExporter
 import com.example.data.local.FinanceAccountEntity
 import com.example.data.local.FinanceTransactionEntity
 import com.example.data.local.KmsDatabase
@@ -23,7 +25,9 @@ import com.example.intelligence.SmartExtractorEngine
 import com.example.intelligence.SmsClassifierEngine
 import com.example.telephony.DeviceSmsSyncManager
 import com.example.telephony.KmsNotificationManager
+import com.example.telephony.RawDeviceSms
 import com.example.telephony.SimSlotInfo
+import com.example.worker.FullSmsSyncWorker
 import com.example.worker.ScheduledSmsWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -37,13 +41,20 @@ data class CleanupSummary(
     val total: Int get() = otpDeleted + promoDeleted + blockedDeleted
 }
 
+data class ForegroundSyncResult(
+    val newlyImported: Int,
+    val totalDeviceMessages: Int,
+    val scheduledBackgroundSync: Boolean
+)
+
 class KmsRepository(
     private val context: Context,
     private val db: KmsDatabase,
     private val prefsRepo: UserPreferencesRepository,
     private val syncManager: DeviceSmsSyncManager,
     private val notificationManager: KmsNotificationManager,
-    private val backupManager: EncryptedBackupManager
+    private val backupManager: EncryptedBackupManager,
+    private val xmlExporter: SmsXmlExporter = SmsXmlExporter(context)
 ) {
     val allActiveMessages: Flow<List<SmsMessageEntity>> = db.smsDao().observeAllActiveMessages()
     val blockedMessages: Flow<List<SmsMessageEntity>> = db.smsDao().observeBlockedMessages()
@@ -70,15 +81,75 @@ class KmsRepository(
     fun hasReadSmsPermission(): Boolean = syncManager.hasReadSmsPermission()
     fun getActiveSimSlots(): List<SimSlotInfo> = syncManager.getActiveSimSlots()
 
-    suspend fun syncFromDeviceInbox(): Int = withContext(Dispatchers.IO) {
+    suspend fun getTotalDeviceSmsCount(): Int = withContext(Dispatchers.IO) {
+        syncManager.getTotalDeviceSmsCount()
+    }
+
+    /**
+     * Fast foreground pass: syncs up to the newest 600 messages immediately so the UI is responsive,
+     * checks total device SMS count, and schedules [FullSmsSyncWorker] in the background when
+     * older messages remain beyond the 600-message foreground window.
+     */
+    suspend fun syncFromDeviceInbox(): ForegroundSyncResult = withContext(Dispatchers.IO) {
+        if (!syncManager.hasReadSmsPermission()) {
+            return@withContext ForegroundSyncResult(0, 0, false)
+        }
+        val totalDeviceCount = syncManager.getTotalDeviceSmsCount()
+        val rawList = syncManager.readDeviceSmsInbox(limit = FOREGROUND_SYNC_LIMIT)
+        val existingIds = db.smsDao().getExistingSystemIds().toHashSet()
+        val ruleCache = mutableMapOf<String, SenderRuleEntity?>()
+        val newlyIndexed = insertSyncedMessages(rawList, existingIds, ruleCache)
+
+        val syncedLinkedCount = db.smsDao().getSystemLinkedCount()
+        val hasRemainingOlder = totalDeviceCount > FOREGROUND_SYNC_LIMIT && syncedLinkedCount < totalDeviceCount
+        if (hasRemainingOlder) {
+            FullSmsSyncWorker.enqueue(
+                context = context,
+                startOffset = FOREGROUND_SYNC_LIMIT,
+                totalEstimate = totalDeviceCount,
+                replaceExisting = false
+            )
+        }
+        ForegroundSyncResult(
+            newlyImported = newlyIndexed,
+            totalDeviceMessages = totalDeviceCount,
+            scheduledBackgroundSync = hasRemainingOlder
+        )
+    }
+
+    /**
+     * Unlimited background sync invoked by [FullSmsSyncWorker]. Streams all SMS messages
+     * from the device telephony database in batches without any count cap.
+     */
+    suspend fun syncAllRemainingInBackground(
+        startOffset: Int = 0,
+        onProgress: suspend (processed: Int, total: Int) -> Unit
+    ): Int = withContext(Dispatchers.IO) {
         if (!syncManager.hasReadSmsPermission()) return@withContext 0
-        val rawList = syncManager.readDeviceSmsInbox()
-        var newlyIndexed = 0
-        for (raw in rawList) {
-            val existing = db.smsDao().getMessageBySystemId(raw.systemSmsId)
-            if (existing != null) continue
+        val existingIds = db.smsDao().getExistingSystemIds().toHashSet()
+        val ruleCache = mutableMapOf<String, SenderRuleEntity?>()
+        var newlyIndexedTotal = 0
+
+        syncManager.streamDeviceSmsBatches(
+            startOffset = startOffset,
+            batchSize = BACKGROUND_BATCH_SIZE
+        ) { processedSoFar, totalCount, batch ->
+            newlyIndexedTotal += insertSyncedMessages(batch, existingIds, ruleCache)
+            onProgress(processedSoFar, totalCount)
+        }
+        newlyIndexedTotal
+    }
+
+    private suspend fun insertSyncedMessages(
+        batch: List<RawDeviceSms>,
+        existingIds: MutableSet<Long>,
+        ruleCache: MutableMap<String, SenderRuleEntity?>
+    ): Int {
+        var insertedCount = 0
+        for (raw in batch) {
+            if (!existingIds.add(raw.systemSmsId)) continue
             val normalized = SmsClassifierEngine.normalizeSender(raw.address)
-            val rule = db.senderRuleDao().getRule(normalized)
+            val rule = ruleCache.getOrPut(normalized) { db.senderRuleDao().getRule(normalized) }
             val classification = SmsClassifierEngine.classify(
                 address = raw.address,
                 body = raw.body,
@@ -103,11 +174,16 @@ class KmsRepository(
             )
             val insertedId = db.smsDao().insert(entity)
             if (insertedId > 0) {
-                newlyIndexed++
+                insertedCount++
                 runSmartExtractions(entity.copy(id = insertedId))
             }
         }
-        newlyIndexed
+        return insertedCount
+    }
+
+    companion object {
+        const val FOREGROUND_SYNC_LIMIT = 600
+        const val BACKGROUND_BATCH_SIZE = 150
     }
 
     suspend fun ingestIncomingSms(
@@ -418,6 +494,16 @@ class KmsRepository(
         prefsRepo.restoreFromBackup(payload.preferences)
         Result.success(payload.messages.size)
     }
+
+    suspend fun getExportFolderCounts(): Map<ExportFolder, Int> = withContext(Dispatchers.IO) {
+        SmsXmlExporter.countPerFolder(db.smsDao().getAllActiveOrderedSnapshot())
+    }
+
+    suspend fun exportMessagesToXml(uri: Uri, selectedFolders: Set<ExportFolder>): Result<Int> =
+        withContext(Dispatchers.IO) {
+            val allMessages = db.smsDao().getAllActiveOrderedSnapshot()
+            xmlExporter.exportToUri(uri, allMessages, selectedFolders)
+        }
 
     private suspend fun runSmartExtractions(sms: SmsMessageEntity) {
         if (sms.isBlocked) return

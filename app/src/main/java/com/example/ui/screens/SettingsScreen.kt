@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -21,16 +22,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CleaningServices
+import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -52,6 +57,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.backup.ExportFolder
 import com.example.data.model.BackupReminderCadence
 import com.example.data.model.RetentionPeriod
 import com.example.data.model.SwipeAction
@@ -70,14 +76,19 @@ fun SettingsScreen(
     onBack: () -> Unit
 ) {
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
+    val syncProgress by viewModel.backgroundSyncProgress.collectAsStateWithLifecycle()
+    val folderCounts by viewModel.exportFolderCounts.collectAsStateWithLifecycle()
+    val totalIndexedCount by viewModel.totalIndexedMessageCount.collectAsStateWithLifecycle()
 
     var showPinDialog by remember { mutableStateOf(false) }
     var showQuickRepliesDialog by remember { mutableStateOf(false) }
+    var showXmlExportDialog by remember { mutableStateOf(false) }
     var signatureDraft by remember(prefs.signatureText) { mutableStateOf(prefs.signatureText) }
 
     // Encrypted Backup Passphrase State
     var pendingExportUri by remember { mutableStateOf<Uri?>(null) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingXmlExportFolders by remember { mutableStateOf<Set<ExportFolder>>(emptySet()) }
 
     val createBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -89,6 +100,15 @@ fun SettingsScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) pendingImportUri = uri
+    }
+
+    val createXmlExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/xml")
+    ) { uri ->
+        if (uri != null && pendingXmlExportFolders.isNotEmpty()) {
+            viewModel.exportMessagesToXml(uri, pendingXmlExportFolders)
+        }
+        pendingXmlExportFolders = emptySet()
     }
 
     Scaffold(
@@ -352,6 +372,71 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // 8. Export Messages to Standard XML by Folder
+            item {
+                SettingsSectionCard(title = "EXPORT MESSAGES (XML)") {
+                    Text(
+                        text = "Export your messages to a portable .xml file and choose specific folders such as Personal, Transactions, Promotions, or Starred.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = { showXmlExportDialog = true },
+                        modifier = Modifier.fillMaxWidth().testTag("export_xml_button")
+                    ) {
+                        Icon(Icons.Rounded.Code, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Export Messages to XML ($totalIndexedCount)")
+                    }
+                }
+            }
+
+            // 9. Unlimited Device SMS Sync
+            item {
+                SettingsSectionCard(title = "DEVICE SMS HISTORY SYNC") {
+                    Text(
+                        text = "Syncs the latest 600 messages instantly in foreground and imports all remaining older SMS messages in the background with live progress in the notification bar.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Currently indexed on-device: $totalIndexedCount messages",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (syncProgress.isRunning) {
+                        Spacer(Modifier.height(10.dp))
+                        val hasTotal = syncProgress.total > 0
+                        if (hasTotal) {
+                            LinearProgressIndicator(
+                                progress = { (syncProgress.processed.toFloat() / syncProgress.total).coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "Syncing in background: ${syncProgress.processed} / ${syncProgress.total}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = { viewModel.triggerFullBackgroundSync() },
+                        enabled = !syncProgress.isRunning,
+                        modifier = Modifier.fillMaxWidth().testTag("sync_all_history_button")
+                    ) {
+                        Icon(Icons.Rounded.Sync, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (syncProgress.isRunning) "Background Sync Running…" else "Sync Full SMS History (Unlimited)")
+                    }
+                }
+            }
         }
     }
 
@@ -435,6 +520,24 @@ fun SettingsScreen(
                 pendingImportUri = null
             },
             onDismiss = { pendingImportUri = null }
+        )
+    }
+
+    if (showXmlExportDialog) {
+        ExportXmlFolderDialog(
+            folderCounts = folderCounts,
+            onConfirm = { selected ->
+                showXmlExportDialog = false
+                pendingXmlExportFolders = selected
+                val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+                val suffix = when {
+                    selected.size == ExportFolder.entries.size -> "all"
+                    selected.size == 1 -> selected.first().name.lowercase()
+                    else -> "${selected.size}_folders"
+                }
+                createXmlExportLauncher.launch("kms_ms_${suffix}_$stamp.xml")
+            },
+            onDismiss = { showXmlExportDialog = false }
         )
     }
 }
@@ -555,6 +658,100 @@ private fun BackupPassphraseDialog(
                 onClick = { onConfirm(pass) },
                 modifier = Modifier.testTag("backup_passphrase_confirm")
             ) { Text(confirmLabel) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun ExportXmlFolderDialog(
+    folderCounts: Map<ExportFolder, Int>,
+    onConfirm: (Set<ExportFolder>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selected by remember {
+        mutableStateOf(
+            setOf(ExportFolder.PERSONAL, ExportFolder.TRANSACTIONS)
+        )
+    }
+    val totalSelectedMessages = selected.sumOf { folderCounts[it] ?: 0 }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Export Messages to XML") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Select the message folders to include in your XML export:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = selected.size == ExportFolder.entries.size,
+                        onClick = {
+                            selected = if (selected.size == ExportFolder.entries.size) {
+                                emptySet()
+                            } else {
+                                ExportFolder.entries.toSet()
+                            }
+                        },
+                        label = { Text("Select All") }
+                    )
+                    FilterChip(
+                        selected = selected == setOf(ExportFolder.PERSONAL, ExportFolder.TRANSACTIONS),
+                        onClick = {
+                            selected = setOf(ExportFolder.PERSONAL, ExportFolder.TRANSACTIONS)
+                        },
+                        label = { Text("Personal + Txns") }
+                    )
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                ExportFolder.entries.forEach { folder ->
+                    val count = folderCounts[folder] ?: 0
+                    val isChecked = folder in selected
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selected = if (isChecked) selected - folder else selected + folder
+                            }
+                            .padding(vertical = 4.dp)
+                            .testTag("export_folder_${folder.name.lowercase()}"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = isChecked,
+                            onCheckedChange = { checked ->
+                                selected = if (checked) selected + folder else selected - folder
+                            }
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${folder.label} ($count)",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Text(
+                                text = folder.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = selected.isNotEmpty() && totalSelectedMessages > 0,
+                onClick = { onConfirm(selected) },
+                modifier = Modifier.testTag("confirm_export_xml_button")
+            ) {
+                Text("Export XML")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }

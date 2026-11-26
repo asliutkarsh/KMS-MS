@@ -117,6 +117,7 @@ fun InboxScreen(
     val isDefaultSms by viewModel.isDefaultSmsApp.collectAsStateWithLifecycle()
     val hasSmsPermission by viewModel.hasSmsPermission.collectAsStateWithLifecycle()
     val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
+    val bgSyncProgress by viewModel.backgroundSyncProgress.collectAsStateWithLifecycle()
 
     var showSearch by remember { mutableStateOf(false) }
     var overflowExpanded by remember { mutableStateOf(false) }
@@ -305,6 +306,15 @@ fun InboxScreen(
         ) {
             if (isSyncing) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else if (bgSyncProgress.isRunning) {
+                if (bgSyncProgress.total > 0) {
+                    LinearProgressIndicator(
+                        progress = { (bgSyncProgress.processed.toFloat() / bgSyncProgress.total).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
             }
 
             // Default SMS Role & Permission Banner when not yet configured

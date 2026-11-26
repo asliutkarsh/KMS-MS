@@ -29,6 +29,15 @@ interface SmsDao {
     @Query("SELECT * FROM sms_messages WHERE isDeleted = 0")
     suspend fun getAllActiveSnapshot(): List<SmsMessageEntity>
 
+    @Query("SELECT * FROM sms_messages WHERE isDeleted = 0 ORDER BY timestamp DESC")
+    suspend fun getAllActiveOrderedSnapshot(): List<SmsMessageEntity>
+
+    @Query("SELECT systemSmsId FROM sms_messages WHERE systemSmsId IS NOT NULL")
+    suspend fun getExistingSystemIds(): List<Long>
+
+    @Query("SELECT COUNT(*) FROM sms_messages WHERE systemSmsId IS NOT NULL")
+    suspend fun getSystemLinkedCount(): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(message: SmsMessageEntity): Long
 

@@ -4,7 +4,11 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.example.KmsMsApplication
+import com.example.backup.ExportFolder
+import com.example.backup.SmsXmlExporter
 import com.example.data.local.FinanceAccountEntity
 import com.example.data.local.FinanceTransactionEntity
 import com.example.data.local.OfferEntity
@@ -23,6 +27,7 @@ import com.example.data.model.SwipeAction
 import com.example.data.model.ThemeMode
 import com.example.data.model.TransactionType
 import com.example.telephony.SimSlotInfo
+import com.example.worker.FullSmsSyncWorker
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -63,6 +69,12 @@ data class SnackbarEvent(
     val actionLabel: String? = null,
     val undoThreadKey: String? = null,
     val undoMessageId: Long? = null
+)
+
+data class BackgroundSyncProgress(
+    val isRunning: Boolean = false,
+    val processed: Int = 0,
+    val total: Int = 0
 )
 
 class KmsMainViewModel(application: Application) : AndroidViewModel(application) {
@@ -100,6 +112,32 @@ class KmsMainViewModel(application: Application) : AndroidViewModel(application)
 
     private val _snackbarEvents = MutableSharedFlow<SnackbarEvent>(extraBufferCapacity = 8)
     val snackbarEvents: SharedFlow<SnackbarEvent> = _snackbarEvents.asSharedFlow()
+
+    val backgroundSyncProgress: StateFlow<BackgroundSyncProgress> = WorkManager.getInstance(app)
+        .getWorkInfosForUniqueWorkFlow(FullSmsSyncWorker.UNIQUE_WORK_NAME)
+        .map { infos ->
+            val active = infos.firstOrNull {
+                it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED
+            }
+            if (active != null) {
+                BackgroundSyncProgress(
+                    isRunning = true,
+                    processed = active.progress.getInt(FullSmsSyncWorker.KEY_PROCESSED, 0),
+                    total = active.progress.getInt(FullSmsSyncWorker.KEY_TOTAL, 0)
+                )
+            } else {
+                BackgroundSyncProgress()
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BackgroundSyncProgress())
+
+    val exportFolderCounts: StateFlow<Map<ExportFolder, Int>> = repository.allActiveMessages
+        .map { messages -> SmsXmlExporter.countPerFolder(messages) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val totalIndexedMessageCount: StateFlow<Int> = repository.allActiveMessages
+        .map { it.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val allThreads: StateFlow<List<ThreadSummary>> = repository.allActiveMessages
         .combine(repository.senderRules) { messages, rules ->
@@ -250,13 +288,48 @@ class KmsMainViewModel(application: Application) : AndroidViewModel(application)
         if (_hasSmsPermission.value) {
             viewModelScope.launch {
                 _isSyncing.value = true
-                val imported = repository.syncFromDeviceInbox()
+                val result = repository.syncFromDeviceInbox()
                 _isSyncing.value = false
                 if (!silent) {
-                    val msg = if (imported > 0) "Synced $imported new messages on-device" else "Inbox is up to date"
+                    val msg = when {
+                        result.scheduledBackgroundSync ->
+                            "Synced recent messages (${result.newlyImported} new). Syncing all ${result.totalDeviceMessages} messages in background…"
+                        result.newlyImported > 0 ->
+                            "Synced ${result.newlyImported} new messages on-device"
+                        else ->
+                            "Inbox is up to date"
+                    }
                     _snackbarEvents.tryEmit(SnackbarEvent(msg))
+                } else if (result.scheduledBackgroundSync) {
+                    _snackbarEvents.tryEmit(
+                        SnackbarEvent("Syncing ${result.totalDeviceMessages} SMS messages in background (check notification bar)")
+                    )
                 }
             }
+        }
+    }
+
+    fun triggerFullBackgroundSync() {
+        _hasSmsPermission.value = repository.hasReadSmsPermission()
+        if (!_hasSmsPermission.value) {
+            _snackbarEvents.tryEmit(SnackbarEvent("SMS permission is required to sync device messages"))
+            return
+        }
+        viewModelScope.launch {
+            val total = repository.getTotalDeviceSmsCount()
+            if (total == 0) {
+                _snackbarEvents.tryEmit(SnackbarEvent("No SMS messages found on device"))
+                return@launch
+            }
+            FullSmsSyncWorker.enqueue(
+                context = app,
+                startOffset = 0,
+                totalEstimate = total,
+                replaceExisting = true
+            )
+            _snackbarEvents.tryEmit(
+                SnackbarEvent("Full sync started for $total messages — progress shown in notification bar")
+            )
         }
     }
 
@@ -552,6 +625,17 @@ class KmsMainViewModel(application: Application) : AndroidViewModel(application)
                 _snackbarEvents.tryEmit(SnackbarEvent("Backup restored (${res.getOrDefault(0)} messages)"))
             } else {
                 _snackbarEvents.tryEmit(SnackbarEvent(res.exceptionOrNull()?.message ?: "Backup restore failed"))
+            }
+        }
+    }
+
+    fun exportMessagesToXml(uri: Uri, selectedFolders: Set<ExportFolder>) {
+        viewModelScope.launch {
+            val res = repository.exportMessagesToXml(uri, selectedFolders)
+            if (res.isSuccess) {
+                _snackbarEvents.tryEmit(SnackbarEvent("Exported ${res.getOrDefault(0)} messages to XML"))
+            } else {
+                _snackbarEvents.tryEmit(SnackbarEvent(res.exceptionOrNull()?.message ?: "XML export failed"))
             }
         }
     }

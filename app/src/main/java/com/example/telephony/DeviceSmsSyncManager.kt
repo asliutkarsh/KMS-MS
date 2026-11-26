@@ -113,6 +113,23 @@ class DeviceSmsSyncManager(private val context: Context) {
         }
     }
 
+    fun getTotalDeviceSmsCount(): Int {
+        if (!hasReadSmsPermission()) return 0
+        return try {
+            context.contentResolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(Telephony.Sms._ID),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                cursor.count
+            } ?: 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+
     fun readDeviceSmsInbox(limit: Int = 600): List<RawDeviceSms> {
         if (!hasReadSmsPermission()) return emptyList()
         val result = mutableListOf<RawDeviceSms>()
@@ -175,6 +192,98 @@ class DeviceSmsSyncManager(private val context: Context) {
             // Gracefully return collected messages on restricted emulators/devices
         }
         return result
+    }
+
+    /**
+     * Streams ALL SMS messages from the system telephony provider without any cap,
+     * reading in chunks of [batchSize] starting from [startOffset].
+     */
+    suspend fun streamDeviceSmsBatches(
+        startOffset: Int = 0,
+        batchSize: Int = 150,
+        onBatch: suspend (processedSoFar: Int, totalCount: Int, batch: List<RawDeviceSms>) -> Unit
+    ): Int {
+        if (!hasReadSmsPermission()) return 0
+        val contactCache = mutableMapOf<String, String?>()
+
+        val projection = arrayOf(
+            Telephony.Sms._ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.TYPE,
+            Telephony.Sms.READ,
+            Telephony.Sms.SUBSCRIPTION_ID
+        )
+
+        var totalCount = 0
+        var processed = 0
+        try {
+            context.contentResolver.query(
+                Telephony.Sms.CONTENT_URI,
+                projection,
+                null,
+                null,
+                "${Telephony.Sms.DATE} DESC"
+            )?.use { cursor ->
+                totalCount = cursor.count
+                if (totalCount == 0 || startOffset >= totalCount) {
+                    return totalCount
+                }
+
+                val idIdx = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
+                val addrIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
+                val bodyIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
+                val dateIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
+                val typeIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+                val readIdx = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
+                val subIdx = cursor.getColumnIndex(Telephony.Sms.SUBSCRIPTION_ID)
+
+                if (startOffset > 0) {
+                    cursor.moveToPosition(startOffset - 1)
+                    processed = startOffset
+                }
+
+                val batch = ArrayList<RawDeviceSms>(batchSize)
+                while (cursor.moveToNext()) {
+                    processed++
+                    val address = cursor.getString(addrIdx)?.trim().orEmpty()
+                    val body = cursor.getString(bodyIdx).orEmpty()
+                    if (address.isBlank() && body.isBlank()) continue
+
+                    val contactName = contactCache.getOrPut(address) { resolveContactName(address) }
+                    val type = cursor.getInt(typeIdx)
+                    val isIncoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX
+                    val isRead = cursor.getInt(readIdx) == 1 || !isIncoming
+                    val subId = if (subIdx >= 0) cursor.getInt(subIdx) else -1
+
+                    batch.add(
+                        RawDeviceSms(
+                            systemSmsId = cursor.getLong(idIdx),
+                            address = address.ifBlank { "Unknown" },
+                            contactName = contactName,
+                            body = body,
+                            timestamp = cursor.getLong(dateIdx),
+                            isIncoming = isIncoming,
+                            isRead = isRead,
+                            simSubscriptionId = subId
+                        )
+                    )
+
+                    if (batch.size >= batchSize) {
+                        onBatch(processed, totalCount, batch.toList())
+                        batch.clear()
+                    }
+                }
+                if (batch.isNotEmpty()) {
+                    onBatch(processed, totalCount, batch.toList())
+                    batch.clear()
+                }
+            }
+        } catch (_: Exception) {
+            // Gracefully stop on restricted devices
+        }
+        return totalCount
     }
 
     fun sendSms(
