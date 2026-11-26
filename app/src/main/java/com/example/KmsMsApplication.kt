@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import androidx.work.Configuration
 import com.example.backup.EncryptedBackupManager
 import com.example.backup.SmsXmlExporter
 import com.example.data.local.KmsDatabase
@@ -10,7 +11,10 @@ import com.example.telephony.DeviceSmsSyncManager
 import com.example.telephony.KmsNotificationManager
 import com.example.worker.AutoCleanupWorker
 
-class KmsMsApplication : Application() {
+class KmsMsApplication : Application(), Configuration.Provider {
+
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder().build()
 
     lateinit var database: KmsDatabase
         private set
