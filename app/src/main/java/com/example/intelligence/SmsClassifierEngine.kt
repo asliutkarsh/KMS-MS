@@ -91,34 +91,56 @@ object SmsClassifierEngine {
     }
 
     fun extractOtp(body: String): String? {
-        otpExplicitTightRegex.find(body)?.groupValues?.getOrNull(1)?.let {
-            return it.replace("-", "")
+        val candidates = sequenceOf(
+            otpExplicitTightRegex.find(body),
+            otpReverseRegex.find(body),
+            otpUseEnterRegex.find(body),
+            otpAppCodeRegex.find(body),
+            otpSeparatedIsRegex.find(body)
+        ).filterNotNull()
+
+        for (match in candidates) {
+            val rawGroup = match.groups[1] ?: continue
+            val code = rawGroup.value.replace("-", "")
+            if (isLikelyValidOtp(code, body, rawGroup.range.first, match.range.first)) {
+                return code
+            }
         }
-        otpReverseRegex.find(body)?.groupValues?.getOrNull(1)?.let {
-            return it.replace("-", "")
-        }
-        otpUseEnterRegex.find(body)?.groupValues?.getOrNull(1)?.let {
-            return it.replace("-", "")
-        }
-        otpAppCodeRegex.find(body)?.groupValues?.getOrNull(1)?.let {
-            return it.replace("-", "")
-        }
-        otpSeparatedIsRegex.find(body)?.groupValues?.getOrNull(1)?.let {
-            return it.replace("-", "")
-        }
+
         val lower = body.lowercase()
-        if (!lower.contains("no otp") && otpContextKeywords.any { lower.contains(it) }) {
+        if (!lower.contains("no otp") && !lower.contains("without otp") &&
+            otpContextKeywords.any { lower.contains(it) }
+        ) {
             val candidate = standaloneCodeRegex.findAll(body)
-                .map { it.groupValues[1] }
+                .mapNotNull { m ->
+                    val raw = m.groups[1] ?: return@mapNotNull null
+                    val code = raw.value
+                    if (isLikelyValidOtp(code, body, raw.range.first, raw.range.first)) code else null
+                }
                 .firstOrNull { code ->
                     val asInt = code.toIntOrNull()
                     val isRecentYear = code.length == 4 && asInt != null && asInt in 2020..2035
-                    val isTollFree = code.startsWith("1800") || code.startsWith("1860")
-                    !isRecentYear && !isTollFree
+                    !isRecentYear
                 }
             if (candidate != null) return candidate
         }
         return null
+    }
+
+    private fun isLikelyValidOtp(code: String, body: String, codeStart: Int, matchStart: Int): Boolean {
+        if (code.startsWith("1800") || code.startsWith("1860")) return false
+        val beforeCode = body.substring((codeStart - 20).coerceAtLeast(0), codeStart).lowercase()
+        if (beforeCode.endsWith("call ") || beforeCode.endsWith("dial ") ||
+            beforeCode.contains("helpline") || beforeCode.contains("toll free") ||
+            beforeCode.endsWith("rs.") || beforeCode.endsWith("rs ") || beforeCode.endsWith("inr ")
+        ) {
+            return false
+        }
+        val beforeMatch = body.substring((matchStart - 12).coerceAtLeast(0), matchStart).lowercase()
+        if (beforeMatch.trimEnd().endsWith("no") || beforeMatch.trimEnd().endsWith("without")) {
+            return false
+        }
+        return true
     }
 
     fun classify(
