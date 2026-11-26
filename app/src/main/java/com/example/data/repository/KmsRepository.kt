@@ -99,6 +99,7 @@ class KmsRepository(
         val existingIds = db.smsDao().getExistingSystemIds().toHashSet()
         val ruleCache = mutableMapOf<String, SenderRuleEntity?>()
         val newlyIndexed = insertSyncedMessages(rawList, existingIds, ruleCache)
+        reclassifyPromotionalOtps()
 
         val syncedLinkedCount = db.smsDao().getSystemLinkedCount()
         val hasRemainingOlder = totalDeviceCount > FOREGROUND_SYNC_LIMIT && syncedLinkedCount < totalDeviceCount
@@ -137,7 +138,33 @@ class KmsRepository(
             newlyIndexedTotal += insertSyncedMessages(batch, existingIds, ruleCache)
             onProgress(processedSoFar, totalCount)
         }
+        reclassifyPromotionalOtps()
         newlyIndexedTotal
+    }
+
+    /**
+     * Re-evaluates messages currently in PROMOTION (without explicit user SenderRules) so any
+     * newly recognized OTP formats automatically move into Transactions with Copy OTP pills.
+     */
+    suspend fun reclassifyPromotionalOtps(): Int = withContext(Dispatchers.IO) {
+        val promos = db.smsDao().getActivePromotionsSnapshot()
+        if (promos.isEmpty()) return@withContext 0
+        val ruleMap = db.senderRuleDao().getAllSnapshot().associateBy { it.normalizedSender }
+        var fixedCount = 0
+        for (msg in promos) {
+            if (ruleMap.containsKey(msg.threadKey)) continue
+            val result = SmsClassifierEngine.classify(
+                address = msg.address,
+                body = msg.body,
+                contactName = msg.contactName,
+                existingRule = null
+            )
+            if (result.otpCode != null && result.category == SmsCategory.TRANSACTION) {
+                db.smsDao().updateCategoryAndOtp(msg.id, result.category, result.otpCode)
+                fixedCount++
+            }
+        }
+        fixedCount
     }
 
     private suspend fun insertSyncedMessages(

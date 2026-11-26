@@ -6,6 +6,7 @@ import com.example.data.local.SmsMessageEntity
 import com.example.data.local.UserPreferences
 import com.example.data.model.SmsCategory
 import com.example.data.model.SwipeAction
+import com.example.intelligence.SmsClassifierEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -116,5 +117,47 @@ class ExampleUnitTest {
     assertTrue(xml.contains("kms_category=\"TRANSACTION\""))
     assertFalse(xml.contains("Big Sale 50% OFF!"))
     assertFalse(xml.contains("Spam text"))
+  }
+
+  @Test
+  fun otpClassifier_recognizesDiverseOtpFormatsAsTransactions() {
+    val otpCases = listOf(
+      "AD-AMAZON" to ("482910 is your Amazon OTP. Do not share it with anyone." to "482910"),
+      "GOOGLE" to ("G-918273 is your Google verification code." to "918273"),
+      "JD-FLPKRT" to ("Use 654321 to verify your Flipkart account. Get flat 10% off on your first order!" to "654321"),
+      "AD-HDFCBK" to ("Your OTP for HDFC Bank txn of Rs. 1,500 at Swiggy is 774411. Valid for 5 mins." to "774411"),
+      "WHATSAPP" to ("<#> Your WhatsApp code: 123-456\n4sgLq1p5sV6" to "123456"),
+      "VM-ZOMATO-P" to ("1234 is your login code for Zomato. Click here to explore exclusive offers." to "1234"),
+      "AD-MYNTRA-P" to ("556677 is your one time password to sign in." to "556677"),
+      "MYAPP" to ("Welcome! Confirm your login on MyApp with 492810. Valid for 5 mins. Do not share." to "492810")
+    )
+
+    for ((sender, bodyAndCode) in otpCases) {
+      val (body, expectedCode) = bodyAndCode
+      val res = SmsClassifierEngine.classify(sender, body, null, null)
+      assertEquals("Expected OTP $expectedCode for $sender", expectedCode, res.otpCode)
+      assertEquals("Expected TRANSACTION for $sender: $body", SmsCategory.TRANSACTION, res.category)
+    }
+  }
+
+  @Test
+  fun otpClassifier_keepsRealPromosInPromotions() {
+    val promo = SmsClassifierEngine.classify(
+      address = "AD-FLIPKT-P",
+      body = "Big Billion Sale! Flat 50% off! Use code SAVE50 or 2025 for extra discount. Click here!",
+      contactName = null,
+      existingRule = null
+    )
+    assertEquals(null, promo.otpCode)
+    assertEquals(SmsCategory.PROMOTION, promo.category)
+
+    val noOtpPromo = SmsClassifierEngine.classify(
+      address = "JD-LOAN-P",
+      body = "Pre-approved instant loan upto Rs 5,00,000! No OTP needed. Call 18001234 today.",
+      contactName = null,
+      existingRule = null
+    )
+    assertEquals(null, noOtpPromo.otpCode)
+    assertEquals(SmsCategory.PROMOTION, noOtpPromo.category)
   }
 }

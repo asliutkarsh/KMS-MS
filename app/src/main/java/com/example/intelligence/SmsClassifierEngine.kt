@@ -20,11 +20,28 @@ object SmsClassifierEngine {
     private val alphanumericSenderRegex = Regex(".*[A-Za-z]{2,}.*")
     private val phoneNumberRegex = Regex("^\\+?\\d[\\d\\s\\-()]{6,}$")
 
-    private val otpExplicitRegex = Regex(
-        "(?i)(?:otp|one[-\\s]?time\\s+password|verification\\s+code|passcode|security\\s+code|login\\s+code|auth\\s+code|pin\\s+code|cvv|code\\s+is)\\D{0,18}(\\d{4,8})\\b"
+    private val otpExplicitTightRegex = Regex(
+        "(?i)\\b(?:otp|one[-\\s]?time\\s+(?:password|passcode|pin)|verification\\s+code|verify\\s+code|passcode|security\\s+code|login\\s+code|auth(?:entication)?\\s+code|2fa\\s+code|mfa\\s+code|secret\\s+code|confirmation\\s+code|tpin|mpin|pin\\s+code|cvv)\\b[^0-9\\n]{0,28}?(?:G-)?(\\d{3}-\\d{3}|\\d{4,8})\\b"
+    )
+    private val otpSeparatedIsRegex = Regex(
+        "(?i)\\b(?:otp|one[-\\s]?time\\s+(?:password|passcode)|verification\\s+code|security\\s+code|login\\s+code|passcode)\\b.{0,80}?\\bis\\s*[:\\-]?\\s*(?:G-)?(\\d{3}-\\d{3}|\\d{4,8})\\b"
     )
     private val otpReverseRegex = Regex(
-        "(?i)\\b(\\d{4,8})\\s+(?:is\\s+your|is\\s+the)\\s+(?:otp|one[-\\s]?time|verification|login|security|auth)\\b"
+        "(?i)(?:^|\\W)(?:G-)?(\\d{3}-\\d{3}|\\d{4,8})\\s+(?:is\\s+(?:your|the)|as)\\s+(?:[A-Za-z0-9._-]+\\s+){0,4}?(?:otp|one[-\\s]?time|verification|verify|login|sign[-\\s]?in|security|auth(?:entication)?|passcode|secret\\s+code|2fa|pin)\\b"
+    )
+    private val otpUseEnterRegex = Regex(
+        "(?i)\\b(?:use|enter|input|type)\\s+(?:code\\s+|otp\\s+)?(?:G-)?(\\d{3}-\\d{3}|\\d{4,8})\\s+(?:to\\s+(?:verify|login|log\\s+in|sign\\s+in|reset|confirm|complete|authenticate)|as\\s+(?:your\\s+)?(?:otp|verification|security|login|auth))\\b"
+    )
+    private val otpAppCodeRegex = Regex(
+        "(?i)(?:your\\s+)?(?:whatsapp|telegram|signal|google|facebook|instagram|twitter|x|amazon|flipkart|swiggy|zomato|uber|ola|paytm|phonepe|hdfc|icici|sbi|axis)\\s+(?:verification\\s+|login\\s+|security\\s+)?code(?:\\s+is)?[:\\s-]+(?:G-)?(\\d{3}-\\d{3}|\\d{4,8})\\b"
+    )
+    private val otpContextKeywords = listOf(
+        "otp", "one time password", "one-time password", "verification code",
+        "security code", "login code", "passcode", "do not share", "never share",
+        "2fa", "mfa", "authentication code"
+    )
+    private val standaloneCodeRegex = Regex(
+        "(?<![₹$€.,\\d-])\\b(\\d{4,8})\\b(?![.,]\\d|%|\\s*(?:am|pm|rs\\b|inr\\b|off\\b))"
     )
 
     private val transactionKeywords = listOf(
@@ -74,8 +91,33 @@ object SmsClassifierEngine {
     }
 
     fun extractOtp(body: String): String? {
-        otpExplicitRegex.find(body)?.groupValues?.getOrNull(1)?.let { return it }
-        otpReverseRegex.find(body)?.groupValues?.getOrNull(1)?.let { return it }
+        otpExplicitTightRegex.find(body)?.groupValues?.getOrNull(1)?.let {
+            return it.replace("-", "")
+        }
+        otpReverseRegex.find(body)?.groupValues?.getOrNull(1)?.let {
+            return it.replace("-", "")
+        }
+        otpUseEnterRegex.find(body)?.groupValues?.getOrNull(1)?.let {
+            return it.replace("-", "")
+        }
+        otpAppCodeRegex.find(body)?.groupValues?.getOrNull(1)?.let {
+            return it.replace("-", "")
+        }
+        otpSeparatedIsRegex.find(body)?.groupValues?.getOrNull(1)?.let {
+            return it.replace("-", "")
+        }
+        val lower = body.lowercase()
+        if (!lower.contains("no otp") && otpContextKeywords.any { lower.contains(it) }) {
+            val candidate = standaloneCodeRegex.findAll(body)
+                .map { it.groupValues[1] }
+                .firstOrNull { code ->
+                    val asInt = code.toIntOrNull()
+                    val isRecentYear = code.length == 4 && asInt != null && asInt in 2020..2035
+                    val isTollFree = code.startsWith("1800") || code.startsWith("1860")
+                    !isRecentYear && !isTollFree
+                }
+            if (candidate != null) return candidate
+        }
         return null
     }
 
@@ -119,10 +161,18 @@ object SmsClassifierEngine {
             )
         }
 
+        // Any verified OTP message always belongs in Transactions (never muted in Promotions)
+        if (otp != null) {
+            return ClassificationResult(
+                category = SmsCategory.TRANSACTION,
+                isBlocked = false,
+                otpCode = otp,
+                isBillMessage = isBill
+            )
+        }
+
         var txnScore = 0
         var promoScore = 0
-
-        if (otp != null) txnScore += 6
 
         val senderUpper = address.trim().uppercase()
         val isBusinessHeader = dltHeaderRegex.matches(senderUpper) || alphanumericSenderRegex.matches(senderUpper)

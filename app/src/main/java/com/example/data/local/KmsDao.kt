@@ -32,6 +32,12 @@ interface SmsDao {
     @Query("SELECT * FROM sms_messages WHERE isDeleted = 0 ORDER BY timestamp DESC")
     suspend fun getAllActiveOrderedSnapshot(): List<SmsMessageEntity>
 
+    @Query("SELECT * FROM sms_messages WHERE isDeleted = 0 AND isBlocked = 0 AND category = 'PROMOTION'")
+    suspend fun getActivePromotionsSnapshot(): List<SmsMessageEntity>
+
+    @Query("UPDATE sms_messages SET category = :category, otpCode = :otpCode WHERE id = :id")
+    suspend fun updateCategoryAndOtp(id: Long, category: SmsCategory, otpCode: String?)
+
     @Query("SELECT systemSmsId FROM sms_messages WHERE systemSmsId IS NOT NULL")
     suspend fun getExistingSystemIds(): List<Long>
 
